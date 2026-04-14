@@ -330,6 +330,7 @@ const TAB_ITEMS = [
           { key: 'hero_sms_phone_attempts', label: '尝试次数', placeholder: '3' },
           { key: 'hero_sms_otp_timeout_seconds', label: '短信等待秒数', placeholder: '120' },
           { key: 'hero_sms_poll_interval_seconds', label: '轮询间隔秒数', placeholder: '5' },
+          { key: 'hero_sms_reuse_number', label: '号码复用（20分钟内）', placeholder: '0 (关闭) / 1 (开启)' },
         ],
       },
     ],

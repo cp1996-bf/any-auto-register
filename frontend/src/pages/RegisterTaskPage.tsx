@@ -625,6 +625,9 @@ export default function RegisterTaskPage() {
             <Form.Item name="hero_sms_poll_interval_seconds" label="轮询间隔秒数">
               <Input placeholder="5" />
             </Form.Item>
+            <Form.Item name="hero_sms_reuse_number" label="号码复用（20分钟内）">
+              <Input placeholder="0 (关闭) / 1 (开启)" />
+            </Form.Item>
           </Card>
         )}
 

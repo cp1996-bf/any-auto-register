@@ -76,6 +76,7 @@ CONFIG_KEYS = [
     "hero_sms_phone_attempts",
     "hero_sms_otp_timeout_seconds",
     "hero_sms_poll_interval_seconds",
+    "hero_sms_reuse_number",
     "luckmail_base_url",
     "luckmail_api_key",
     "luckmail_email_type",

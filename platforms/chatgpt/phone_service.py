@@ -138,8 +138,12 @@ class HeroSmsPhoneService:
         self.max_attempts = _to_positive_int(self.config.get("hero_sms_phone_attempts"), 3)
         self.otp_timeout_seconds = _to_positive_int(self.config.get("hero_sms_otp_timeout_seconds"), 120, minimum=10)
         self.poll_interval_seconds = _to_positive_int(self.config.get("hero_sms_poll_interval_seconds"), 5, minimum=1)
+        self.reuse_number = str(self.config.get("hero_sms_reuse_number", "") or "").strip().lower() in ("1", "true", "yes", "on")
         # 当前激活记录，用于 wait_for_code / complete / cancel
         self._current_activation: Optional[HeroSmsActivation] = None
+        # 复用缓存：上一次成功接码的激活记录和 PhoneEntry
+        self._reusable_activation: Optional[HeroSmsActivation] = None
+        self._reusable_entry: Optional[PhoneEntry] = None
 
     @property
     def enabled(self) -> bool:
@@ -149,9 +153,19 @@ class HeroSmsPhoneService:
         return _prefix_hint(phone)
 
     def acquire_phone(self, *, exclude_prefixes: Optional[Iterable[str]] = None) -> Optional[PhoneEntry]:
-        """购买一个虚拟号码，返回兼容 PhoneEntry 的对象。"""
+        """购买一个虚拟号码，返回兼容 PhoneEntry 的对象。复用模式下优先返回上次的号码。"""
         if not self.api_key:
             return None
+
+        # 复用模式：优先复用上一次成功接码的号码
+        if self.reuse_number and self._reusable_activation and self._reusable_entry:
+            self._current_activation = self._reusable_activation
+            self.log_fn(
+                f"[HeroSMS] 复用号码: {self._reusable_activation.phone} "
+                f"(id={self._reusable_activation.activation_id})"
+            )
+            return self._reusable_entry
+
         try:
             self.log_fn(f"[HeroSMS] 购买号码: service={self.service}, country={self.country}")
             activation = hero_get_number(
@@ -162,12 +176,12 @@ class HeroSmsPhoneService:
             )
             self._current_activation = activation
             self.log_fn(f"[HeroSMS] 获得号码: {activation.phone} (id={activation.activation_id}, cost={activation.cost})")
-            # 包装成 PhoneEntry 兼容格式
-            return PhoneEntry(
+            entry = PhoneEntry(
                 country_slug=f"hero_sms_{activation.country}",
                 phone=activation.phone,
                 detail_url=f"hero-sms://activation/{activation.activation_id}",
             )
+            return entry
         except HeroSmsNoNumberError:
             self.log_fn("[HeroSMS] 无可用号码")
             return None
@@ -176,10 +190,14 @@ class HeroSmsPhoneService:
             return None
 
     def mark_blacklisted(self, phone: str) -> None:
-        """取消当前激活。"""
+        """取消当前激活（复用模式下清除复用缓存）。"""
         if self._current_activation and self._current_activation.phone == phone:
             self.log_fn(f"[HeroSMS] 取消激活: {self._current_activation.activation_id}")
             hero_cancel(self.api_key, self._current_activation.activation_id)
+            # 号码被拉黑，清除复用缓存
+            if self._reusable_activation and self._reusable_activation.activation_id == self._current_activation.activation_id:
+                self._reusable_activation = None
+                self._reusable_entry = None
             self._current_activation = None
 
     def wait_for_code(self, entry: PhoneEntry, *, timeout: Optional[int] = None) -> Optional[str]:
@@ -196,7 +214,13 @@ class HeroSmsPhoneService:
             trace=lambda message: self.log_fn(f"[HeroSMS] {message}"),
         )
         if code:
-            # 收到验证码后标记完成
-            hero_complete(self.api_key, self._current_activation.activation_id)
-            self.log_fn(f"[HeroSMS] 激活完成: {self._current_activation.activation_id}")
+            if self.reuse_number:
+                # 复用模式：不 complete，保持号码活跃，缓存供下次使用
+                self._reusable_activation = self._current_activation
+                self._reusable_entry = entry
+                self.log_fn(f"[HeroSMS] 复用模式：保持激活 {self._current_activation.activation_id}，号码可继续接码")
+            else:
+                # 非复用模式：立即 complete
+                hero_complete(self.api_key, self._current_activation.activation_id)
+                self.log_fn(f"[HeroSMS] 激活完成: {self._current_activation.activation_id}")
         return code
