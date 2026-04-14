@@ -223,6 +223,7 @@ def wait_for_code(
     timeout: float = 120.0,
     poll_interval: float = 5.0,
     trace: Optional[Callable[[str], None]] = None,
+    request_resend: bool = False,
 ) -> Optional[str]:
     """轮询等待验证码。
 
@@ -232,6 +233,7 @@ def wait_for_code(
         timeout: 最大等待秒数
         poll_interval: 轮询间隔秒数
         trace: 日志回调
+        request_resend: 是否请求新验证码（用于复用号码时重试）
 
     Returns:
         验证码字符串，超时返回 None
@@ -240,12 +242,19 @@ def wait_for_code(
     deadline = time.monotonic() + timeout
     poll_count = 0
 
-    # 先标记准备接收
-    try:
-        set_status(api_key, activation_id, STATUS_READY)
-        emit(f"已标记 activation {activation_id} 为准备接收状态")
-    except Exception as e:
-        emit(f"标记准备状态失败（可忽略）: {e}")
+    # 复用号码时先请求重发（setStatus=3），避免拿到缓存的旧验证码
+    if request_resend:
+        try:
+            set_status(api_key, activation_id, STATUS_RESEND)
+            emit(f"复用号码，请求重发新验证码 activation {activation_id}")
+        except Exception as e:
+            emit(f"请求重发失败（可忽略）: {e}")
+    else:
+        try:
+            set_status(api_key, activation_id, STATUS_READY)
+            emit(f"已标记 activation {activation_id} 为准备接收状态")
+        except Exception as e:
+            emit(f"标记准备状态失败（可忽略）: {e}")
 
     while True:
         remaining = deadline - time.monotonic()

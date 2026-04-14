@@ -3167,6 +3167,8 @@ class OutlookImapMailboxBackend(OutlookMailboxBackend):
         keyword_lower = str(keyword or "").strip().lower()
         # 记录开始等待的时间，只接受此时间之后的邮件
         poll_start = time.time()
+        # 目标邮箱地址（含变种），用于过滤共享收件箱中发给其他变种的邮件
+        target_email = str(account.email or "").strip().lower()
 
         def poll_once() -> Optional[str]:
             for folder in self.mailbox._imap_folder_names:
@@ -3236,6 +3238,18 @@ class OutlookImapMailboxBackend(OutlookMailboxBackend):
                                     continue
                             except Exception:
                                 pass
+                        # 变种邮箱场景：按 To/Delivered-To 头过滤，只接受发给当前变种的邮件
+                        if "+" in target_email.split("@")[0]:
+                            recipient_headers = " ".join([
+                                str(msg.get("To", "")),
+                                str(msg.get("Delivered-To", "")),
+                                str(msg.get("X-Original-To", "")),
+                            ]).lower()
+                            if target_email not in recipient_headers:
+                                self.mailbox._log(
+                                    f"[微软邮箱][IMAP] folder={folder} 跳过非目标收件人邮件: to={msg.get('To', '')}"
+                                )
+                                continue
                         subject = self.mailbox._decode_header_value(msg.get("Subject", ""))
                         text = self.mailbox._extract_message_text(msg)
                         self.mailbox._log(

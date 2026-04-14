@@ -108,6 +108,10 @@ class SMSToMePhoneService:
             raise_on_timeout=False,
         )
 
+    def release_phone(self) -> None:
+        """SMSToMe 不需要释放号码（号码池模型）。"""
+        pass
+
 
 class HeroSmsPhoneService:
     """基于 HeroSMS (hero-sms.com) API 的接码服务。
@@ -121,6 +125,10 @@ class HeroSmsPhoneService:
       - hero_sms_otp_timeout_seconds: 验证码等待超时（默认 120 秒）
       - hero_sms_poll_interval_seconds: 轮询间隔（默认 5 秒）
     """
+
+    # 类级别复用缓存（跨实例共享，用于跨注册任务复用同一号码）
+    _shared_reusable_activation: Optional["HeroSmsActivation"] = None
+    _shared_reusable_entry: Optional[PhoneEntry] = None
 
     def __init__(self, config: Optional[dict] = None, log_fn: Optional[Callable[[str], None]] = None):
         self.config = dict(config or {})
@@ -157,14 +165,14 @@ class HeroSmsPhoneService:
         if not self.api_key:
             return None
 
-        # 复用模式：优先复用上一次成功接码的号码
-        if self.reuse_number and self._reusable_activation and self._reusable_entry:
-            self._current_activation = self._reusable_activation
+        # 复用模式：优先复用上一次成功接码的号码（类级别缓存，跨实例共享）
+        if self.reuse_number and HeroSmsPhoneService._shared_reusable_activation and HeroSmsPhoneService._shared_reusable_entry:
+            self._current_activation = HeroSmsPhoneService._shared_reusable_activation
             self.log_fn(
-                f"[HeroSMS] 复用号码: {self._reusable_activation.phone} "
-                f"(id={self._reusable_activation.activation_id})"
+                f"[HeroSMS] 复用号码: {HeroSmsPhoneService._shared_reusable_activation.phone} "
+                f"(id={HeroSmsPhoneService._shared_reusable_activation.activation_id})"
             )
-            return self._reusable_entry
+            return HeroSmsPhoneService._shared_reusable_entry
 
         try:
             self.log_fn(f"[HeroSMS] 购买号码: service={self.service}, country={self.country}")
@@ -194,11 +202,28 @@ class HeroSmsPhoneService:
         if self._current_activation and self._current_activation.phone == phone:
             self.log_fn(f"[HeroSMS] 取消激活: {self._current_activation.activation_id}")
             hero_cancel(self.api_key, self._current_activation.activation_id)
-            # 号码被拉黑，清除复用缓存
-            if self._reusable_activation and self._reusable_activation.activation_id == self._current_activation.activation_id:
-                self._reusable_activation = None
-                self._reusable_entry = None
+            # 号码被拉黑，清除类级别复用缓存
+            if HeroSmsPhoneService._shared_reusable_activation and HeroSmsPhoneService._shared_reusable_activation.activation_id == self._current_activation.activation_id:
+                HeroSmsPhoneService._shared_reusable_activation = None
+                HeroSmsPhoneService._shared_reusable_entry = None
             self._current_activation = None
+
+    def release_phone(self) -> None:
+        """注册成功后调用：完成当前激活并清除跨账号复用缓存。
+
+        保证下一个账号会买新号码，避免 OpenAI 检测到同一号码绑定多账号。
+        注意：本次账号内部的重试仍会复用（缓存在 wait_for_code 中设置）。
+        """
+        if self._current_activation:
+            try:
+                hero_complete(self.api_key, self._current_activation.activation_id)
+                self.log_fn(f"[HeroSMS] 注册成功，已完成激活: {self._current_activation.activation_id}")
+            except Exception as e:
+                self.log_fn(f"[HeroSMS] 完成激活失败（可忽略）: {e}")
+        # 清除跨账号缓存，下个账号必须买新号码
+        HeroSmsPhoneService._shared_reusable_activation = None
+        HeroSmsPhoneService._shared_reusable_entry = None
+        self._current_activation = None
 
     def wait_for_code(self, entry: PhoneEntry, *, timeout: Optional[int] = None) -> Optional[str]:
         """轮询等待验证码。"""
@@ -206,18 +231,25 @@ class HeroSmsPhoneService:
             self.log_fn("[HeroSMS] 无当前激活记录，无法等待验证码")
             return None
         wait_seconds = _to_positive_int(timeout, self.otp_timeout_seconds, minimum=10)
+        # 复用号码场景：当前激活 = 共享缓存的激活，需要请求重发新验证码
+        is_reused = (
+            HeroSmsPhoneService._shared_reusable_activation is not None
+            and HeroSmsPhoneService._shared_reusable_activation.activation_id
+            == self._current_activation.activation_id
+        )
         code = hero_wait_for_code(
             api_key=self.api_key,
             activation_id=self._current_activation.activation_id,
             timeout=wait_seconds,
             poll_interval=self.poll_interval_seconds,
             trace=lambda message: self.log_fn(f"[HeroSMS] {message}"),
+            request_resend=is_reused,
         )
         if code:
             if self.reuse_number:
-                # 复用模式：不 complete，保持号码活跃，缓存供下次使用
-                self._reusable_activation = self._current_activation
-                self._reusable_entry = entry
+                # 复用模式：不 complete，保持号码活跃，缓存到类级别供下次注册使用
+                HeroSmsPhoneService._shared_reusable_activation = self._current_activation
+                HeroSmsPhoneService._shared_reusable_entry = entry
                 self.log_fn(f"[HeroSMS] 复用模式：保持激活 {self._current_activation.activation_id}，号码可继续接码")
             else:
                 # 非复用模式：立即 complete
