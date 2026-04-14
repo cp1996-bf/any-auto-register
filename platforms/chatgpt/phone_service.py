@@ -12,6 +12,17 @@ from smstome_tool import (
     wait_for_otp,
 )
 
+from hero_sms_tool import (
+    HeroSmsActivation,
+    HeroSmsError,
+    HeroSmsNoNumberError,
+    cancel_activation as hero_cancel,
+    complete_activation as hero_complete,
+    get_balance as hero_get_balance,
+    get_number as hero_get_number,
+    wait_for_code as hero_wait_for_code,
+)
+
 
 def _to_positive_int(value, default: int, *, minimum: int = 1) -> int:
     try:
@@ -96,3 +107,96 @@ class SMSToMePhoneService:
             trace=lambda message: self.log_fn(f"[SMSToMe] {message}"),
             raise_on_timeout=False,
         )
+
+
+class HeroSmsPhoneService:
+    """基于 HeroSMS (hero-sms.com) API 的接码服务。
+
+    配置项：
+      - hero_sms_api_key: API 密钥（必填）
+      - hero_sms_service: 服务代码（默认 "dr"，OpenAI）
+      - hero_sms_country: 国家代码（默认 0，任意国家）
+      - hero_sms_max_price: 最高单价限制
+      - hero_sms_phone_attempts: 最大尝试次数（默认 3）
+      - hero_sms_otp_timeout_seconds: 验证码等待超时（默认 120 秒）
+      - hero_sms_poll_interval_seconds: 轮询间隔（默认 5 秒）
+    """
+
+    def __init__(self, config: Optional[dict] = None, log_fn: Optional[Callable[[str], None]] = None):
+        self.config = dict(config or {})
+        self.log_fn = log_fn or (lambda _msg: None)
+        self.api_key = str(self.config.get("hero_sms_api_key", "") or "").strip()
+        self.service = str(self.config.get("hero_sms_service", "") or "").strip() or "dr"
+        self.country = int(self.config.get("hero_sms_country", 0) or 0)
+        self.max_price = None
+        _mp = self.config.get("hero_sms_max_price")
+        if _mp is not None and str(_mp).strip():
+            try:
+                self.max_price = float(str(_mp).strip())
+            except ValueError:
+                pass
+        self.max_attempts = _to_positive_int(self.config.get("hero_sms_phone_attempts"), 3)
+        self.otp_timeout_seconds = _to_positive_int(self.config.get("hero_sms_otp_timeout_seconds"), 120, minimum=10)
+        self.poll_interval_seconds = _to_positive_int(self.config.get("hero_sms_poll_interval_seconds"), 5, minimum=1)
+        # 当前激活记录，用于 wait_for_code / complete / cancel
+        self._current_activation: Optional[HeroSmsActivation] = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.api_key)
+
+    def prefix_hint(self, phone: str) -> str:
+        return _prefix_hint(phone)
+
+    def acquire_phone(self, *, exclude_prefixes: Optional[Iterable[str]] = None) -> Optional[PhoneEntry]:
+        """购买一个虚拟号码，返回兼容 PhoneEntry 的对象。"""
+        if not self.api_key:
+            return None
+        try:
+            self.log_fn(f"[HeroSMS] 购买号码: service={self.service}, country={self.country}")
+            activation = hero_get_number(
+                api_key=self.api_key,
+                service=self.service,
+                country=self.country,
+                max_price=self.max_price,
+            )
+            self._current_activation = activation
+            self.log_fn(f"[HeroSMS] 获得号码: {activation.phone} (id={activation.activation_id}, cost={activation.cost})")
+            # 包装成 PhoneEntry 兼容格式
+            return PhoneEntry(
+                country_slug=f"hero_sms_{activation.country}",
+                phone=activation.phone,
+                detail_url=f"hero-sms://activation/{activation.activation_id}",
+            )
+        except HeroSmsNoNumberError:
+            self.log_fn("[HeroSMS] 无可用号码")
+            return None
+        except HeroSmsError as e:
+            self.log_fn(f"[HeroSMS] 购买号码失败: {e}")
+            return None
+
+    def mark_blacklisted(self, phone: str) -> None:
+        """取消当前激活。"""
+        if self._current_activation and self._current_activation.phone == phone:
+            self.log_fn(f"[HeroSMS] 取消激活: {self._current_activation.activation_id}")
+            hero_cancel(self.api_key, self._current_activation.activation_id)
+            self._current_activation = None
+
+    def wait_for_code(self, entry: PhoneEntry, *, timeout: Optional[int] = None) -> Optional[str]:
+        """轮询等待验证码。"""
+        if not self._current_activation:
+            self.log_fn("[HeroSMS] 无当前激活记录，无法等待验证码")
+            return None
+        wait_seconds = _to_positive_int(timeout, self.otp_timeout_seconds, minimum=10)
+        code = hero_wait_for_code(
+            api_key=self.api_key,
+            activation_id=self._current_activation.activation_id,
+            timeout=wait_seconds,
+            poll_interval=self.poll_interval_seconds,
+            trace=lambda message: self.log_fn(f"[HeroSMS] {message}"),
+        )
+        if code:
+            # 收到验证码后标记完成
+            hero_complete(self.api_key, self._current_activation.activation_id)
+            self.log_fn(f"[HeroSMS] 激活完成: {self._current_activation.activation_id}")
+        return code
