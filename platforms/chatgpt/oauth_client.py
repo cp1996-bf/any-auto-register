@@ -2937,16 +2937,13 @@ class OAuthClient:
                 last_failure = detail or "手机号 OTP 验证失败"
                 self._log(last_failure)
                 excluded_prefixes.add(prefix)
-                # 验证失败：如果是复用号码，清除缓存，下次买新号码
-                if hasattr(phone_service, '_current_activation') and phone_service._current_activation:
-                    if (isinstance(phone_service, HeroSmsPhoneService)
-                        and HeroSmsPhoneService._shared_reusable_activation
-                        and HeroSmsPhoneService._shared_reusable_activation.activation_id
-                            == phone_service._current_activation.activation_id):
-                        self._log("[HeroSMS] 复用号码验证失败，清除缓存，下次买新号码")
-                        phone_service.release_phone()
                 continue
 
+            # 手机验证成功：释放号码（完成激活+清除跨账号复用缓存）
+            try:
+                phone_service.release_phone()
+            except Exception as exc:
+                self._log(f"释放手机号失败（可忽略）: {exc}")
             return validated_state
 
         self._set_error(f"add_phone 阶段失败: {last_failure or '未完成手机号验证'}")

@@ -609,12 +609,6 @@ class RefreshTokenRegistrationEngine:
 
             if not tokens:
                 last_error = oauth_client.last_error or "OAuth 登录状态机失败"
-                # OAuth 失败时清除 HeroSMS 复用缓存，下次买新号码
-                from platforms.chatgpt.phone_service import HeroSmsPhoneService
-                if HeroSmsPhoneService._shared_reusable_activation:
-                    self._log("[HeroSMS] OAuth 失败，清除号码复用缓存")
-                    HeroSmsPhoneService._shared_reusable_activation = None
-                    HeroSmsPhoneService._shared_reusable_entry = None
                 if "add_phone" in last_error:
                     self._log(
                         "OAuth add_phone 阻断，启动并行 OAuth 重试（3 路并发）...",
